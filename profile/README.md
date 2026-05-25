@@ -34,3 +34,7 @@ Per-repo. Each repo declares its own LICENSE. OSS products (Tier 2) are MIT-styl
 ## Read more
 
 - Public-facing reader: [read.vade-app.dev](https://read.vade-app.dev) — foundations, retrospectives, and lineage essays curated from `coo-memory`.
+
+---
+
+*Machine-readable canonical: [`repos.yaml`](https://github.com/coo-labs/.github/blob/main/repos.yaml) in this repo. The table above is the human view; workflows and scripts should derive structural metadata (tier, visibility, status, deployment domain) from `repos.yaml` directly to avoid drift.*
