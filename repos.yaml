@@ -1,0 +1,132 @@
+# coo-labs canonical repo registry.
+#
+# Single source of truth for org/repo structure metadata. Consumers
+# (workflows, scripts) read this via:
+#
+#   gh api repos/coo-labs/.github/contents/repos.yaml \
+#     --jq '.content | @base64d' | yq ...
+#
+# or by cloning the .github repo. Drift from actual org membership is
+# silently load-bearing — guarded by bin/registry-check.sh (planned in
+# coo-memory; see the F17b follow-up issue).
+#
+# See coo-labs/coo-memory#948 (F17, the README this underwrites)
+# and the F17b sibling for the consumer-migration work.
+
+org: coo-labs
+
+tiers:
+  T1:
+    label: "Tier 1 — substrate / OS"
+    description: |
+      Repos the COO agent runs on day-to-day: identity, kernel, logs,
+      dev surface. The `coo-*` prefix is reserved for this instance.
+  T2:
+    label: "Tier 2 — OSS products"
+    description: |
+      Releasable artifacts useful to the broader Claude Code /
+      agent-substrate community. Versioned, installable. Short direct
+      names.
+  T3:
+    label: "Tier 3 — in-development apps / services"
+    description: |
+      Long-range product expression toward deployed surfaces.
+      Deployment-derived names.
+
+# repos: complete org membership. Includes archived repos with
+# status=archived so the registry serves as drift-check baseline.
+repos:
+  - name: coo-memory
+    tier: T1
+    visibility: private
+    status: active
+    role: >-
+      Canonical identity + memory store: charter, governance, preferences,
+      identity layer, memos, foundations, retrospectives, lineage events,
+      audits, ops docs. The COO's durable record.
+
+  - name: coo-harness
+    tier: T1
+    visibility: public
+    status: active
+    role: >-
+      Boot orchestration: SessionStart hooks, integrity checks, MCP
+      projection, PAT routing, session lifecycle, transcript export.
+      The COO's kernel.
+
+  - name: coo-logs
+    tier: T1
+    visibility: private
+    status: active
+    role: >-
+      Append-only audit trail: session summaries, transcript sidecars
+      (raw transcripts live in R2), incidents, billing, telemetry.
+      The COO's OS-logs record.
+
+  - name: coo-console
+    tier: T1
+    visibility: private
+    status: active
+    role: >-
+      Hosted multi-tool dev/observability surface. Currently in
+      development, baked for our needs; visibility flips or splits
+      when ready.
+
+  - name: tjsonl
+    tier: T2
+    visibility: public
+    status: active
+    role: >-
+      Community schema spec for Claude Code transcript format +
+      zero-dependency Python CLI.
+
+  - name: skills
+    tier: T2
+    visibility: public
+    status: active
+    role: >-
+      Portable Claude Code skills + sub-agent definitions.
+
+  - name: coo4one
+    tier: T2
+    visibility: public
+    status: active
+    role: >-
+      Apple-native COO architecture as personal-assistant system.
+
+  - name: vade-canvas
+    tier: T3
+    visibility: public
+    status: active
+    deployment_domain: vade-app.dev
+    role: >-
+      The canvas: tldraw + React SPA + MCP bridge + Cloudflare Worker.
+      The visual-agent-society IDE.
+
+  - name: site
+    tier: T3
+    visibility: public
+    status: active
+    deployment_domain: read.vade-app.dev
+    role: >-
+      Public-facing rendered HTML projected from `coo-memory` via
+      Quarto build pipeline.
+
+  - name: vade-governance
+    tier: T1
+    visibility: public
+    status: archived
+    archived_at: "2026-05-24"
+    role: >-
+      Historical (archived 2026-05-24 per MEMO-2026-05-24-q3tk). Public
+      authority + decision-rights doc; content transferred to
+      coo-memory/identity/ at archive time. Listed here so registry
+      drift-checks can verify archive state.
+
+  - name: .github
+    tier: meta
+    visibility: public
+    status: active
+    role: >-
+      Org-profile repo. Hosts profile/README.md (rendered on the
+      coo-labs org page) and repos.yaml (this file).
