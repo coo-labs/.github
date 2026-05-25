@@ -1,0 +1,54 @@
+name: Registry drift-check
+
+# Asserts repos.yaml matches the live coo-labs org state — membership,
+# visibility, status. Runs in three contexts:
+#
+#   - PR to repos.yaml: catches "this PR adds a repo to the registry but
+#     the repo doesn't exist yet" or vice versa, at review time.
+#   - Push to main (repos.yaml): same drift surface, on the merged state.
+#   - Nightly schedule: catches drift introduced via the GitHub UI (a
+#     repo created, archived, or visibility-flipped without a PR to
+#     repos.yaml). Without this, the registry can silently lie.
+#
+# The drift-check script itself lives in coo-harness/scripts/ (kernel
+# scope per F11; see MEMO-2026-05-25-txjg). Source: coo-labs/coo-memory#999.
+
+on:
+  pull_request:
+    paths:
+      - 'repos.yaml'
+      - '.github/workflows/registry-check.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'repos.yaml'
+  schedule:
+    # Daily at 12:00 UTC.
+    - cron: '0 12 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: registry-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  drift-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout coo-harness (script lives there per F11 kernel scope)
+        uses: actions/checkout@v4
+        with:
+          repository: coo-labs/coo-harness
+          path: coo-harness
+
+      - name: Run registry-check
+        env:
+          # VADE_FIELDS_ADMIN_PAT is the org-secret mirror of the COO PAT
+          # (visibility=all). Needed because the live org includes private
+          # repos (coo-memory, coo-logs, coo-console) that github.token —
+          # scoped to the .github repo only — cannot enumerate.
+          GH_TOKEN: ${{ secrets.VADE_FIELDS_ADMIN_PAT }}
+        run: bash coo-harness/scripts/registry-check.sh
