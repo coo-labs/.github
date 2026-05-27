@@ -7,11 +7,11 @@
 #     --jq '.content | @base64d' | yq ...
 #
 # or by cloning the .github repo. Drift from actual org membership is
-# silently load-bearing — guarded by bin/registry-check.sh (planned in
-# coo-memory; see the F17b follow-up issue).
+# silently load-bearing — guarded by `coo-harness/scripts/registry-check.sh`,
+# invoked from `.github/workflows/registry-check.yml` in this repo.
 #
 # See coo-labs/coo-memory#948 (F17, the README this underwrites)
-# and the F17b sibling for the consumer-migration work.
+# and coo-labs/coo-memory#999 (F17b, the consumer-migration work; closed).
 
 org: coo-labs
 
