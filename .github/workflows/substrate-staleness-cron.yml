@@ -1,0 +1,240 @@
+name: Substrate staleness cron
+
+# Cross-repo cron sweep — defense-in-depth pair with the at-PR-open
+# lint at coo-labs/coo-harness/.github/workflows/substrate-staleness-lint-reusable.yml.
+# The lint catches new drift a PR introduces; this cron catches drift
+# that lands without a PR (renames on `main`, manual edits in admin UIs,
+# substrate moves that didn't go through migration-protocol).
+#
+# Per coo-memory/operations/ci-strategy.md G2 (drift-watch),
+# retirement-criterion (d) defense-in-depth-perpetual.
+# Per coo-memory#1219 locked design item 3: cron home is coo-labs/.github,
+# single scheduled workflow iterating siblings, daily 02:00 UTC (offset
+# from the 02:00 GMT+2 Night's Watch so the sticky report is fresh when
+# the Watch reads it).
+# Per locked design item 5: one sticky issue in coo-memory, per-repo +
+# per-manifest hits in body, diff-vs-yesterday-only mutations.
+#
+# Canonical home: coo-labs/.github/.github/workflows/substrate-staleness-cron.yml
+# Schema entry: coo-harness/config/ci-health/schema.yaml (id: substrate-staleness-lint, loop_position: at-PR-open+cron)
+# Lifecycle birth: coo-memory/operations/ci-lifecycle/log.jsonl
+
+on:
+  schedule:
+    # 02:00 UTC daily. 02:00 GMT+2 Night's Watch reads the resulting
+    # sticky issue when it runs.
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "If true, run sweep but do not mutate the sticky issue. Logs the would-be diff."
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: substrate-staleness-cron
+  cancel-in-progress: false  # cron runs are short and serial; cancel-in-progress would lose a day's signal
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    env:
+      STICKY_TITLE: "[substrate-staleness-cron] active drift report"
+      STICKY_LABEL: "substrate-staleness-cron"
+      STICKY_REPO: "coo-labs/coo-memory"
+    steps:
+      - name: Checkout coo-labs/.github (this repo — for repos.yaml)
+        uses: actions/checkout@v4
+        with:
+          path: registry
+
+      - name: Checkout coo-memory (script + manifests)
+        uses: actions/checkout@v4
+        with:
+          repository: coo-labs/coo-memory
+          token: ${{ secrets.VADE_FIELDS_ADMIN_PAT }}
+          path: substrate
+
+      - name: Install yq
+        run: |
+          sudo curl -fsSL -o /usr/local/bin/yq \
+            https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+
+      - name: Determine active sibling repos
+        id: siblings
+        run: |
+          set -e
+          # Active, non-meta repos from the canonical registry.
+          repos=$(yq -r '.repos[] | select(.status == "active" and .tier != "meta") | .name' \
+                    registry/repos.yaml | sort)
+          if [ -z "$repos" ]; then
+            echo "::error::registry returned empty active-repo list"
+            exit 1
+          fi
+          {
+            echo "list<<EOF"
+            echo "$repos"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "Active siblings to sweep:"
+          echo "$repos" | sed 's/^/  /'
+
+      - name: Sweep each sibling against each manifest
+        id: sweep
+        env:
+          GH_TOKEN: ${{ secrets.VADE_FIELDS_ADMIN_PAT }}
+          SIBLINGS: ${{ steps.siblings.outputs.list }}
+        run: |
+          set -e
+          script="$GITHUB_WORKSPACE/substrate/bin/migration-sweep.py"
+          manifests=( "$GITHUB_WORKSPACE/substrate/bin/manifests"/*.yaml )
+
+          report=""
+          any_drift=0
+          per_repo_summary=""
+
+          while IFS= read -r repo; do
+            [ -z "$repo" ] && continue
+            echo "::group::sibling=$repo"
+            workdir="$GITHUB_WORKSPACE/siblings/$repo"
+            mkdir -p "$workdir"
+            # Shallow clone to keep runner-minutes bounded; the verify
+            # only inspects current tree, not history.
+            if ! git clone --quiet --depth=1 \
+                "https://x-access-token:${GH_TOKEN}@github.com/coo-labs/${repo}.git" \
+                "$workdir" 2>&1; then
+              echo "::warning::clone failed for coo-labs/${repo}; skipping"
+              per_repo_summary="${per_repo_summary}- \`${repo}\`: **clone-failed**\n"
+              echo "::endgroup::"
+              continue
+            fi
+
+            repo_drift=0
+            repo_section=""
+            for m in "${manifests[@]}"; do
+              mname=$(basename "$m" .yaml)
+              cd "$workdir"
+              set +e
+              out=$(python3 "$script" --mode verify --manifest "$m" --root . \
+                      --repos-yaml /dev/null --ignore-missing-new \
+                      --format text 2>&1)
+              rc=$?
+              set -e
+              if [ $rc -eq 0 ]; then
+                : # clean
+              elif [ $rc -eq 2 ]; then
+                repo_drift=1
+                any_drift=1
+                # Strip the new_hits / missing_new lines (informational
+                # under --ignore-missing-new); keep the actionable hits.
+                hits=$(echo "$out" | awk '/^  old_hits:/,/^  missing_new|^  new hits for/' \
+                        | grep -v '^  missing_new\|^  new hits for' || true)
+                repo_section="${repo_section}  - manifest \`${mname}\`:\n\`\`\`\n${hits}\n\`\`\`\n"
+              else
+                # Unexpected (3 = manifest load error). Surface loud.
+                repo_drift=1
+                any_drift=1
+                repo_section="${repo_section}  - manifest \`${mname}\`: **lint-error exit=${rc}**\n\`\`\`\n${out}\n\`\`\`\n"
+              fi
+            done
+
+            if [ $repo_drift -eq 1 ]; then
+              per_repo_summary="${per_repo_summary}- \`${repo}\`: **drift**\n${repo_section}"
+            else
+              per_repo_summary="${per_repo_summary}- \`${repo}\`: clean\n"
+            fi
+            echo "::endgroup::"
+          done <<< "$SIBLINGS"
+
+          # Marker for idempotent mutation; the diff-vs-yesterday compare
+          # uses this body fingerprint.
+          marker="<!-- substrate-staleness-cron -->"
+          ts_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          if [ $any_drift -eq 0 ]; then
+            body_md=$(printf '%s\n\n%s\n\n%s\n' \
+              "$marker" \
+              "**Last sweep:** ${ts_utc}" \
+              "All siblings clean across all manifests.")
+          else
+            body_md=$(printf '%s\n\n%s\n\n### Per-repo status\n\n%b\n\n%s\n' \
+              "$marker" \
+              "**Last sweep:** ${ts_utc}" \
+              "$per_repo_summary" \
+              "_Generated by \`coo-labs/.github/.github/workflows/substrate-staleness-cron.yml\`. Run via \`gh workflow run substrate-staleness-cron.yml --repo coo-labs/.github\`._")
+          fi
+
+          {
+            echo "any_drift=${any_drift}"
+            echo 'body<<BODYEOF'
+            printf '%s\n' "$body_md"
+            echo 'BODYEOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Mutate sticky issue (diff-vs-yesterday)
+        if: ${{ inputs.dry_run != true }}
+        env:
+          GH_TOKEN: ${{ secrets.VADE_FIELDS_ADMIN_PAT }}
+          ANY_DRIFT: ${{ steps.sweep.outputs.any_drift }}
+          BODY: ${{ steps.sweep.outputs.body }}
+        run: |
+          set -e
+          # Strip the timestamp line + marker before hashing — both
+          # change every run regardless of drift, defeating the
+          # diff-vs-yesterday intent.
+          fingerprint_body() {
+            echo "$1" | grep -v '^<!-- substrate-staleness-cron -->$' \
+                     | grep -v '^\*\*Last sweep:\*\*' \
+                     | sha256sum | cut -d' ' -f1
+          }
+
+          # Find existing sticky issue (by title; label is set on create).
+          existing_num=$(gh issue list --repo "$STICKY_REPO" --state open \
+              --search "in:title \"$STICKY_TITLE\"" --json number,title \
+              --jq ".[] | select(.title == \"$STICKY_TITLE\") | .number" | head -1)
+
+          if [ "$ANY_DRIFT" = "0" ]; then
+            if [ -n "$existing_num" ]; then
+              echo "Drift cleared. Closing sticky issue #${existing_num}."
+              gh issue comment "$existing_num" --repo "$STICKY_REPO" \
+                --body "$BODY"
+              gh issue close "$existing_num" --repo "$STICKY_REPO" \
+                --reason completed
+            else
+              echo "No drift, no sticky. End silently."
+            fi
+            exit 0
+          fi
+
+          # Drift exists.
+          new_fp=$(fingerprint_body "$BODY")
+          if [ -n "$existing_num" ]; then
+            existing_body=$(gh issue view "$existing_num" --repo "$STICKY_REPO" --json body --jq .body)
+            old_fp=$(fingerprint_body "$existing_body")
+            if [ "$new_fp" = "$old_fp" ]; then
+              echo "Sticky #${existing_num} body unchanged. Skipping mutation (diff-vs-yesterday)."
+            else
+              echo "Sticky #${existing_num} body changed. Updating."
+              echo "$BODY" | gh issue edit "$existing_num" --repo "$STICKY_REPO" --body-file -
+            fi
+          else
+            echo "Drift detected; creating sticky issue."
+            echo "$BODY" | gh issue create --repo "$STICKY_REPO" \
+              --title "$STICKY_TITLE" \
+              --label "$STICKY_LABEL" \
+              --body-file -
+          fi
+
+      - name: Dry-run diff output
+        if: ${{ inputs.dry_run == true }}
+        env:
+          ANY_DRIFT: ${{ steps.sweep.outputs.any_drift }}
+          BODY: ${{ steps.sweep.outputs.body }}
+        run: |
+          echo "any_drift=${ANY_DRIFT}"
+          echo "----- would-be sticky body -----"
+          echo "$BODY"
+          echo "----- (not mutating; dry_run=true) -----"
